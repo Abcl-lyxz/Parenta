@@ -1,0 +1,30 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080
+  },
+  "storage": {
+    "data_dir": "./data"
+  },
+  "opennds": {
+    "ndsctl_path": "/usr/bin/ndsctl",
+    "fas_key": "CHANGE_THIS_SECRET_KEY",
+    "gateway_ip": "192.168.2.1"
+  },
+  "dnsmasq": {
+    "conf_dir": "/etc/dnsmasq.d",
+    "restart_cmd": "/etc/init.d/dnsmasq restart"
+  },
+  "defaults": {
+    "daily_quota_minutes": 120,
+    "admin_username": "admin",
+    "admin_password": "parenta123",
+    "force_password_change": true,
+    "timezone": "Asia/Bangkok"
+  },
+  "session": {
+    "tick_interval_seconds": 30,
+    "jwt_secret": "CHANGE_THIS_JWT_SECRET",
+    "jwt_expiry_hours": 24
+  }
+}
