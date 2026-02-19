@@ -93,10 +93,26 @@ const SystemPage = {
                 <div id="tab-commands" class="tab-content hidden">
                     <div class="card">
                         <div class="card-header">
-                            <h2>System Commands</h2>
+                            <h2>Custom Shell</h2>
                         </div>
                         <p style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem;">
-                            Run diagnostic commands on the router. Only safe, read-only commands are allowed.
+                            Execute any shell command on the router. Use with caution.
+                        </p>
+                        <form id="shell-form" onsubmit="SystemPage.executeShell(event)" style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+                            <input type="text" id="shell-input" placeholder="Enter command (e.g., ls -la /etc)" style="flex: 1;">
+                            <button type="submit" class="btn-small">Run</button>
+                        </form>
+                        <div id="shell-output" class="command-output hidden">
+                            <pre></pre>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h2>Quick Commands</h2>
+                        </div>
+                        <p style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                            Run common diagnostic commands.
                         </p>
                         <div class="command-buttons">
                             <button class="btn-small btn-secondary" onclick="SystemPage.runCommand('uptime', [])">Uptime</button>
@@ -283,6 +299,33 @@ const SystemPage = {
     },
 
     // ============ Commands ============
+
+    async executeShell(e) {
+        e.preventDefault();
+        const input = document.getElementById('shell-input');
+        const command = input.value.trim();
+        if (!command) return;
+
+        const outputDiv = document.getElementById('shell-output');
+        const pre = outputDiv.querySelector('pre');
+
+        outputDiv.classList.remove('hidden');
+        pre.textContent = `$ ${command}\nRunning...`;
+
+        try {
+            const result = await API.executeShell(command);
+            let output = `$ ${result.command}\n\n${result.output}`;
+            if (result.error) {
+                output += `\nError: ${result.error}`;
+            }
+            if (result.exit_code !== 0) {
+                output += `\n\n[Exit code: ${result.exit_code}]`;
+            }
+            pre.textContent = output;
+        } catch (error) {
+            pre.textContent = `$ ${command}\n\nError: ${error.message}`;
+        }
+    },
 
     async runCommand(command, args) {
         const outputDiv = document.getElementById('command-output');

@@ -57,6 +57,7 @@ const ChildrenPage = {
 
                                     <div style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-secondary);">
                                         ${c.devices.length} device(s) registered
+                                        ${c.schedule_name ? ` · Schedule: ${escapeHtml(c.schedule_name)}` : ''}
                                     </div>
 
                                     <div class="btn-group" style="margin-top: 1rem;">
@@ -110,6 +111,13 @@ const ChildrenPage = {
                                 </select>
                             </div>
 
+                            <div style="margin-top: 1rem;">
+                                <label for="child-schedule">Schedule</label>
+                                <select id="child-schedule">
+                                    <option value="">No schedule (always allowed)</option>
+                                </select>
+                            </div>
+
                             <div id="child-error" class="error hidden"></div>
 
                             <div class="form-actions">
@@ -145,6 +153,19 @@ const ChildrenPage = {
                 btn.classList.remove('active');
             }
         });
+    },
+
+    async loadScheduleOptions() {
+        try {
+            const schedules = await API.getSchedules();
+            const select = document.getElementById('child-schedule');
+            select.innerHTML = '<option value="">No schedule (always allowed)</option>' +
+                schedules.map(s =>
+                    `<option value="${s.id}">${escapeHtml(s.name)}${s.is_default ? ' (Default)' : ''}</option>`
+                ).join('');
+        } catch (e) {
+            console.error('Failed to load schedules:', e);
+        }
     },
 
     async renderDetail(params) {
@@ -201,7 +222,7 @@ const ChildrenPage = {
         }
     },
 
-    showAddModal() {
+    async showAddModal() {
         document.getElementById('child-modal-title').textContent = 'Add Child';
         document.getElementById('child-id').value = '';
         document.getElementById('child-name').value = '';
@@ -212,6 +233,8 @@ const ChildrenPage = {
         document.getElementById('password-hint').textContent = '(required)';
         document.getElementById('child-password').required = true;
         document.getElementById('child-error').classList.add('hidden');
+        await this.loadScheduleOptions();
+        document.getElementById('child-schedule').value = '';
         document.getElementById('child-modal').classList.remove('hidden');
         this.highlightQuotaPreset(120);
     },
@@ -230,6 +253,8 @@ const ChildrenPage = {
             document.getElementById('password-hint').textContent = '(leave blank to keep current)';
             document.getElementById('child-password').required = false;
             document.getElementById('child-error').classList.add('hidden');
+            await this.loadScheduleOptions();
+            document.getElementById('child-schedule').value = child.schedule_id || '';
             document.getElementById('child-modal').classList.remove('hidden');
             this.highlightQuotaPreset(child.daily_quota_min);
         } catch (error) {
@@ -250,6 +275,7 @@ const ChildrenPage = {
             username: document.getElementById('child-username').value,
             daily_quota_min: parseInt(document.getElementById('child-quota').value),
             filter_mode: document.getElementById('child-mode').value,
+            schedule_id: document.getElementById('child-schedule').value || '',
             is_active: true
         };
 

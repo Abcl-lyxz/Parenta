@@ -379,6 +379,79 @@ func (h *SystemHandler) HandleLogs(w http.ResponseWriter, r *http.Request) {
 	JSON(w, http.StatusOK, resp)
 }
 
+// ============ Shell Execution ============
+
+// ShellRequest represents shell execution request
+type ShellRequest struct {
+	Command string `json:"command"` // Full command string e.g. "ls -la /etc"
+}
+
+// HandleShell executes arbitrary shell command (admin only)
+func (h *SystemHandler) HandleShell(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		Error(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req ShellRequest
+	if err := ParseJSON(r, &req); err != nil {
+		Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if strings.TrimSpace(req.Command) == "" {
+		Error(w, http.StatusBadRequest, "command is required")
+		return
+	}
+
+	// Execute command with 30 second timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", req.Command)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else if ctx.Err() == context.DeadlineExceeded {
+			exitCode = -1
+		} else {
+			exitCode = -1
+		}
+	}
+
+	output := stdout.String()
+	if stderr.Len() > 0 {
+		if output != "" {
+			output += "\n"
+		}
+		output += stderr.String()
+	}
+
+	// Truncate output if too long (100KB)
+	if len(output) > 100000 {
+		output = output[:100000] + "\n... (output truncated)"
+	}
+
+	resp := CommandResponse{
+		Command:  req.Command,
+		Output:   output,
+		ExitCode: exitCode,
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		resp.Error = "command timed out after 30 seconds"
+	} else if err != nil && exitCode == -1 {
+		resp.Error = err.Error()
+	}
+
+	JSON(w, http.StatusOK, resp)
+}
+
 // ============ Dashboard Metrics ============
 
 // DashboardResponse represents enhanced dashboard metrics

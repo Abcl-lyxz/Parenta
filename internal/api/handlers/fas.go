@@ -3,12 +3,15 @@ package handlers
 import (
 	"encoding/base64"
 	"fmt"
-	"html/template"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
+	"parenta/internal/api/middleware"
 	"parenta/internal/config"
 	"parenta/internal/models"
 	"parenta/internal/services"
@@ -21,6 +24,7 @@ type FASHandler struct {
 	ndsctl  *services.NDSCtl
 	authSvc *services.AuthService
 	config  *config.Config
+	auth    *middleware.AuthMiddleware
 }
 
 // NewFASHandler creates a new FASHandler
@@ -29,18 +33,20 @@ func NewFASHandler(
 	ndsctl *services.NDSCtl,
 	authSvc *services.AuthService,
 	cfg *config.Config,
+	auth *middleware.AuthMiddleware,
 ) *FASHandler {
 	return &FASHandler{
 		storage: store,
 		ndsctl:  ndsctl,
 		authSvc: authSvc,
 		config:  cfg,
+		auth:    auth,
 	}
 }
 
 // FASData holds decoded FAS parameters
 type FASData struct {
-	HID         string // Hash ID from openNDS
+	HID         string
 	ClientIP    string
 	ClientMAC   string
 	GatewayName string
@@ -49,49 +55,182 @@ type FASData struct {
 	OriginURL   string
 }
 
+// getMACFromIP pulls the MAC address from the router's ARP table
+func getMACFromIP(ip string) string {
+	data, err := os.ReadFile("/proc/net/arp")
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		// /proc/net/arp format: IP address, HW type, Flags, HW address, Mask, Device
+		if len(fields) >= 4 && fields[0] == ip {
+			return fields[3]
+		}
+	}
+	return ""
+}
+
 // HandleFAS handles the initial FAS redirect from openNDS
 func (h *FASHandler) HandleFAS(w http.ResponseWriter, r *http.Request) {
-	// Get the fas query parameter (base64 encoded)
 	fasParam := r.URL.Query().Get("fas")
+
 	if fasParam == "" {
-		Error(w, http.StatusBadRequest, "missing fas parameter")
+		log.Printf("FAS: No 'fas' param found. Redirecting to portal.")
+		http.Redirect(w, r, "/portal", http.StatusFound)
 		return
 	}
 
-	// Decode base64
-	decoded, err := base64.StdEncoding.DecodeString(fasParam)
+	log.Printf("FAS: Raw fas param (first 200 chars): %.200s", fasParam)
+
+	// 1. Normalize base64: URL query params turn '+' into spaces
+	fasParam = strings.ReplaceAll(fasParam, " ", "+")
+
+	// 2. Strip any padding issues and try multiple decode strategies
+	var decodedBytes []byte
+	var err error
+
+	// Try standard base64 first
+	decodedBytes, err = base64.StdEncoding.DecodeString(fasParam)
 	if err != nil {
-		Error(w, http.StatusBadRequest, "invalid fas parameter")
-		return
+		// Try with padding fixed
+		padded := fasParam
+		if m := len(padded) % 4; m != 0 {
+			padded += strings.Repeat("=", 4-m)
+		}
+		decodedBytes, err = base64.StdEncoding.DecodeString(padded)
+		if err != nil {
+			// Try URL-safe encoding
+			decodedBytes, err = base64.URLEncoding.DecodeString(fasParam)
+			if err != nil {
+				// Try RawStdEncoding (no padding)
+				decodedBytes, err = base64.RawStdEncoding.DecodeString(fasParam)
+				if err != nil {
+					log.Printf("FAS: All base64 decode attempts failed: %v", err)
+					http.Redirect(w, r, "/portal", http.StatusFound)
+					return
+				}
+			}
+		}
 	}
 
-	// Parse the decoded data (format: key=value&key2=value2)
-	fasData := h.parseFASData(string(decoded))
+	// 3. Convert to string and clean thoroughly
+	rawString := string(decodedBytes)
 
-	// Redirect to login portal with parameters
-	portalURL := fmt.Sprintf("/portal?hid=%s&mac=%s&ip=%s&gatewayname=%s&authdir=%s&originurl=%s",
-		url.QueryEscape(fasData.HID),
-		url.QueryEscape(fasData.ClientMAC),
-		url.QueryEscape(fasData.ClientIP),
-		url.QueryEscape(fasData.GatewayName),
-		url.QueryEscape(fasData.AuthDir),
-		url.QueryEscape(fasData.OriginURL),
+	// Strip null bytes and all non-printable characters
+	rawString = strings.Map(func(r rune) rune {
+		if r == 0 || r < 32 || r > 126 {
+			return -1
+		}
+		return r
+	}, rawString)
+
+	// Strip OpenNDS "(null)" artifacts that appear at the end of FAS data.
+	// OpenNDS appends literal "(null)" text for unset custom parameters.
+	rawString = strings.TrimRight(rawString, " ,")
+	for strings.Contains(rawString, "(null)") {
+		rawString = strings.ReplaceAll(rawString, "(null)", "")
+	}
+	rawString = strings.TrimRight(rawString, " ,")
+
+	log.Printf("FAS Decoded Data (Cleaned): %s", rawString)
+
+	// 4. Parse the cleaned string
+	fasData := h.parseFASData(rawString)
+
+	// 5. Fallback for MAC address via ARP if parsing failed or was missing
+	if fasData.ClientMAC == "" {
+		clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if fasData.ClientIP == "" {
+			fasData.ClientIP = clientIP
+		}
+		fasData.ClientMAC = getMACFromIP(fasData.ClientIP)
+		log.Printf("FAS: Auto-discovered MAC %s for IP %s via ARP", fasData.ClientMAC, fasData.ClientIP)
+	}
+
+	// 6. Normalize MAC
+	fasData.ClientMAC = normalizeMAC(fasData.ClientMAC)
+
+	// 7. URL-decode values that OpenNDS may have percent-encoded inside the base64 payload
+	fasData.GatewayName = safeURLUnescape(fasData.GatewayName)
+	fasData.OriginURL = safeURLUnescape(fasData.OriginURL)
+	fasData.AuthDir = safeURLUnescape(fasData.AuthDir)
+
+	// 8. Sanitize all values to ensure no control characters leak into HTTP headers
+	fasData.HID = sanitizeHeaderValue(fasData.HID)
+	fasData.ClientMAC = sanitizeHeaderValue(fasData.ClientMAC)
+	fasData.ClientIP = sanitizeHeaderValue(fasData.ClientIP)
+	fasData.GatewayName = sanitizeHeaderValue(fasData.GatewayName)
+	fasData.AuthDir = sanitizeHeaderValue(fasData.AuthDir)
+	fasData.OriginURL = sanitizeHeaderValue(fasData.OriginURL)
+
+	log.Printf("FAS Parsed: hid=%s mac=%s ip=%s gw=%s originurl=%s",
+		fasData.HID, fasData.ClientMAC, fasData.ClientIP, fasData.GatewayName, fasData.OriginURL)
+
+	// 9. Safely construct the redirect URL using url.Values
+	redirectParams := url.Values{}
+	redirectParams.Set("hid", fasData.HID)
+	redirectParams.Set("mac", fasData.ClientMAC)
+	redirectParams.Set("ip", fasData.ClientIP)
+	redirectParams.Set("gatewayname", fasData.GatewayName)
+	redirectParams.Set("authdir", fasData.AuthDir)
+	redirectParams.Set("originurl", fasData.OriginURL)
+
+	portalURL := fmt.Sprintf("http://%s:%v/portal?%s",
+		h.config.OpenNDS.GatewayIP,
+		h.config.Server.Port,
+		redirectParams.Encode(),
 	)
 
+	log.Printf("FAS Redirect URL: %s", portalURL)
+
+	// 10. Execute redirect
 	http.Redirect(w, r, portalURL, http.StatusFound)
 }
 
-// parseFASData parses the FAS query string
+// safeURLUnescape decodes percent-encoded strings, returning original on error
+func safeURLUnescape(s string) string {
+	if unescaped, err := url.QueryUnescape(s); err == nil {
+		return unescaped
+	}
+	return s
+}
+
+// sanitizeHeaderValue removes any characters that could corrupt HTTP headers.
+// Only allows printable ASCII (space through tilde), no control chars or null bytes.
+func sanitizeHeaderValue(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 32 && r <= 126 {
+			return r
+		}
+		return -1
+	}, s)
+}
+
+// parseFASData parses the FAS query string (Level 1 format: "key1=var1, key2=var2, ...")
 func (h *FASHandler) parseFASData(data string) FASData {
 	var fas FASData
+	
 	pairs := strings.Split(data, ", ")
 	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
 		parts := strings.SplitN(pair, "=", 2)
 		if len(parts) != 2 {
 			continue
 		}
-		key := strings.TrimSpace(parts[0])
+		
+		key := strings.TrimSpace(strings.ToLower(parts[0]))
 		value := strings.TrimSpace(parts[1])
+
+		// Skip empty values and OpenNDS null markers
+		if value == "" || value == "(null)" {
+			continue
+		}
 
 		switch key {
 		case "hid":
@@ -113,37 +252,6 @@ func (h *FASHandler) parseFASData(data string) FASData {
 	return fas
 }
 
-// HandlePortal serves the captive portal login page
-func (h *FASHandler) HandlePortal(w http.ResponseWriter, r *http.Request) {
-	// Get all children for the login form
-	children := h.storage.ListChildren()
-
-	data := struct {
-		HID         string
-		MAC         string
-		IP          string
-		GatewayName string
-		AuthDir     string
-		OriginURL   string
-		Children    []*models.Child
-		Error       string
-	}{
-		HID:         r.URL.Query().Get("hid"),
-		MAC:         r.URL.Query().Get("mac"),
-		IP:          r.URL.Query().Get("ip"),
-		GatewayName: r.URL.Query().Get("gatewayname"),
-		AuthDir:     r.URL.Query().Get("authdir"),
-		OriginURL:   r.URL.Query().Get("originurl"),
-		Children:    children,
-		Error:       r.URL.Query().Get("error"),
-	}
-
-	// Serve the portal page
-	tmpl := template.Must(template.New("portal").Parse(portalTemplate))
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl.Execute(w, data)
-}
-
 // AuthRequest represents child login form submission
 type AuthRequest struct {
 	Username  string `json:"username"`
@@ -155,9 +263,13 @@ type AuthRequest struct {
 	OriginURL string `json:"originurl"`
 }
 
-// HandleAuth processes child login from captive portal
+// HandleAuth processes login from captive portal (supports both admin and child)
 func (h *FASHandler) HandleAuth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		if r.Method == http.MethodGet {
+			http.Redirect(w, r, "/portal", http.StatusFound)
+			return
+		}
 		Error(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -165,8 +277,9 @@ func (h *FASHandler) HandleAuth(w http.ResponseWriter, r *http.Request) {
 	// Parse form or JSON
 	var req AuthRequest
 	contentType := r.Header.Get("Content-Type")
+	isJSON := strings.Contains(contentType, "application/json")
 
-	if strings.Contains(contentType, "application/json") {
+	if isJSON {
 		if err := ParseJSON(r, &req); err != nil {
 			Error(w, http.StatusBadRequest, "invalid request")
 			return
@@ -179,66 +292,122 @@ func (h *FASHandler) HandleAuth(w http.ResponseWriter, r *http.Request) {
 			Password:  r.FormValue("password"),
 			HID:       r.FormValue("hid"),
 			MAC:       r.FormValue("mac"),
-			IP:        r.FormValue("ip"),
+			IP:       r.FormValue("ip"),
 			AuthDir:   r.FormValue("authdir"),
 			OriginURL: r.FormValue("originurl"),
 		}
 	}
 
-	// Authenticate child
+	// Auto-discover MAC via ARP if missing (Plug & Play Rescue)
+	if req.MAC == "" {
+		clientIP := req.IP
+		if clientIP == "" {
+			clientIP, _, _ = net.SplitHostPort(r.RemoteAddr)
+		}
+		req.MAC = getMACFromIP(clientIP)
+		if req.MAC != "" {
+			log.Printf("Auth: Auto-discovered MAC %s for IP %s via ARP", req.MAC, clientIP)
+		}
+	}
+
+	// Validate MAC format if provided
+	if req.MAC != "" {
+		req.MAC = normalizeMAC(req.MAC)
+	}
+
+	// Try admin authentication first
+	admin, err := h.authSvc.AuthenticateAdmin(req.Username, req.Password)
+	if err == nil {
+		// Admin success - generate JWT
+		token, err := h.auth.GenerateToken(admin.ID, admin.Username, true, h.config.Session.JWTExpiryHours)
+		if err != nil {
+			log.Printf("Failed to generate token for admin %s: %v", admin.Username, err)
+			Error(w, http.StatusInternalServerError, "authentication error")
+			return
+		}
+
+		// Grant internet access via OpenNDS if MAC provided
+		if req.MAC != "" {
+			if err := h.ndsctl.Deauth(req.MAC); err != nil {
+				log.Printf("Pre-deauth failed for MAC %s: %v", req.MAC, err)
+			}
+			time.Sleep(100 * time.Millisecond)
+
+			if err := h.ndsctl.Auth(req.MAC, 0, 0, 0); err != nil {
+				log.Printf("ndsctl auth failed for admin %s (MAC: %s): %v", admin.Username, req.MAC, err)
+			} else {
+				log.Printf("Admin %s authenticated on MAC %s with unlimited access", admin.Username, req.MAC)
+			}
+		} else {
+			log.Printf("Admin %s logged in without MAC (dashboard only)", admin.Username)
+		}
+
+		if isJSON {
+			JSON(w, http.StatusOK, map[string]interface{}{
+				"type":                  "admin",
+				"token":                 token,
+				"expires_in":            h.config.Session.JWTExpiryHours * 3600,
+				"force_password_change": admin.ForcePasswordChange,
+			})
+		} else {
+			redirectURL := fmt.Sprintf("/portal?auth_type=admin&token=%s&force_password_change=%t",
+				url.QueryEscape(token), admin.ForcePasswordChange)
+			http.Redirect(w, r, redirectURL, http.StatusFound)
+		}
+		return
+	}
+
+	// Try child authentication
 	child, err := h.authSvc.AuthenticateChild(req.Username, req.Password)
 	if err != nil {
-		// Redirect back to portal with error
-		errorURL := fmt.Sprintf("/portal?hid=%s&mac=%s&ip=%s&authdir=%s&originurl=%s&error=%s",
-			url.QueryEscape(req.HID),
-			url.QueryEscape(req.MAC),
-			url.QueryEscape(req.IP),
-			url.QueryEscape(req.AuthDir),
-			url.QueryEscape(req.OriginURL),
-			url.QueryEscape("Invalid username or password"),
-		)
-		http.Redirect(w, r, errorURL, http.StatusFound)
+		log.Printf("Failed login attempt for username: %s from IP: %s MAC: %s", req.Username, req.IP, req.MAC)
+		if isJSON {
+			Error(w, http.StatusUnauthorized, "Invalid username or password")
+		} else {
+			errorURL := fmt.Sprintf("/portal?hid=%s&mac=%s&ip=%s&authdir=%s&originurl=%s&error=%s",
+				url.QueryEscape(req.HID), url.QueryEscape(req.MAC), url.QueryEscape(req.IP),
+				url.QueryEscape(req.AuthDir), url.QueryEscape(req.OriginURL), url.QueryEscape("Invalid username or password"))
+			http.Redirect(w, r, errorURL, http.StatusFound)
+		}
 		return
 	}
 
-	// Check quota
+	log.Printf("Child %s (ID: %s) attempting login from MAC: %s IP: %s", child.Name, child.ID, req.MAC, req.IP)
+
 	if child.RemainingMinutes() <= 0 {
-		errorURL := fmt.Sprintf("/portal?hid=%s&mac=%s&ip=%s&authdir=%s&originurl=%s&error=%s",
-			url.QueryEscape(req.HID),
-			url.QueryEscape(req.MAC),
-			url.QueryEscape(req.IP),
-			url.QueryEscape(req.AuthDir),
-			url.QueryEscape(req.OriginURL),
-			url.QueryEscape("No time remaining for today"),
-		)
-		http.Redirect(w, r, errorURL, http.StatusFound)
+		log.Printf("Child %s denied: no time remaining", child.Name)
+		if isJSON {
+			Error(w, http.StatusForbidden, "No time remaining for today")
+		} else {
+			errorURL := fmt.Sprintf("/portal?hid=%s&mac=%s&ip=%s&authdir=%s&originurl=%s&error=%s",
+				url.QueryEscape(req.HID), url.QueryEscape(req.MAC), url.QueryEscape(req.IP),
+				url.QueryEscape(req.AuthDir), url.QueryEscape(req.OriginURL), url.QueryEscape("No time remaining for today"))
+			http.Redirect(w, r, errorURL, http.StatusFound)
+		}
 		return
 	}
 
-	// Check schedule
 	if child.ScheduleID != "" {
 		schedule := h.storage.GetSchedule(child.ScheduleID)
 		if schedule != nil && !schedule.IsAllowedNow() {
-			errorURL := fmt.Sprintf("/portal?hid=%s&mac=%s&ip=%s&authdir=%s&originurl=%s&error=%s",
-				url.QueryEscape(req.HID),
-				url.QueryEscape(req.MAC),
-				url.QueryEscape(req.IP),
-				url.QueryEscape(req.AuthDir),
-				url.QueryEscape(req.OriginURL),
-				url.QueryEscape("Internet access not allowed at this time"),
-			)
-			http.Redirect(w, r, errorURL, http.StatusFound)
+			if isJSON {
+				Error(w, http.StatusForbidden, "Internet access not allowed at this time")
+			} else {
+				errorURL := fmt.Sprintf("/portal?hid=%s&mac=%s&ip=%s&authdir=%s&originurl=%s&error=%s",
+					url.QueryEscape(req.HID), url.QueryEscape(req.MAC), url.QueryEscape(req.IP),
+					url.QueryEscape(req.AuthDir), url.QueryEscape(req.OriginURL), url.QueryEscape("Internet access not allowed at this time"))
+				http.Redirect(w, r, errorURL, http.StatusFound)
+			}
 			return
 		}
 	}
 
-	// Auto-discover device if new
-	if !child.HasDevice(req.MAC) {
-		child.AddDevice(req.MAC, "Auto-discovered device")
+	if req.MAC != "" && !child.HasDevice(req.MAC) {
+		deviceName := fmt.Sprintf("Device %d", len(child.Devices)+1)
+		child.AddDevice(req.MAC, deviceName)
 		h.storage.SaveChild(child)
 	}
 
-	// Create session
 	session := &models.Session{
 		ID:        services.GenerateID(),
 		ChildID:   child.ID,
@@ -250,20 +419,48 @@ func (h *FASHandler) HandleAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	h.storage.SaveSession(session)
 
-	// Authenticate with openNDS
 	remainingMin := child.RemainingMinutes()
-	if err := h.ndsctl.Auth(req.MAC, remainingMin, 0, 0); err != nil {
-		// Log error but continue - client might still get through
-		fmt.Printf("ndsctl auth error: %v\n", err)
+
+	if req.MAC != "" {
+		_ = h.ndsctl.Deauth(req.MAC)
+		time.Sleep(50 * time.Millisecond)
+
+		if err := h.ndsctl.Auth(req.MAC, remainingMin, 0, 0); err != nil {
+			log.Printf("ndsctl auth failed for child %s (MAC: %s): %v", child.Name, req.MAC, err)
+		} else {
+			log.Printf("Child %s authenticated on MAC %s with %d minutes", child.Name, req.MAC, remainingMin)
+		}
 	}
 
-	// Redirect to original URL or success page
-	if req.OriginURL != "" && req.OriginURL != "null" {
-		http.Redirect(w, r, req.OriginURL, http.StatusFound)
+	if isJSON {
+		JSON(w, http.StatusOK, map[string]interface{}{
+			"type":              "child",
+			"child_name":        child.Name,
+			"remaining_minutes": remainingMin,
+			"redirect_url":      req.OriginURL,
+		})
 	} else {
-		// Show success page
-		h.showSuccessPage(w, child, remainingMin)
+		redirectTarget := req.OriginURL
+		if redirectTarget == "" || redirectTarget == "null" {
+			redirectTarget = "http://" + h.config.OpenNDS.GatewayIP + ":8080/portal?success=1"
+		}
+		redirectURL := fmt.Sprintf("%s&child_name=%s&remaining=%d",
+			redirectTarget, url.QueryEscape(child.Name), remainingMin)
+		http.Redirect(w, r, redirectURL, http.StatusFound)
 	}
+}
+
+// normalizeMAC standardizes MAC address format
+func normalizeMAC(mac string) string {
+	mac = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(mac, ":", ""), "-", ""), ".", ""))
+	if len(mac) == 12 {
+		var parts []string
+		for i := 0; i < 12; i += 2 {
+			parts = append(parts, mac[i:i+2])
+		}
+		return strings.Join(parts, ":")
+	}
+	return mac
 }
 
 // HandleStatus shows remaining time for a logged-in client
@@ -294,160 +491,3 @@ func (h *FASHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		"session_start":     session.StartedAt,
 	})
 }
-
-// showSuccessPage displays a success page after login
-func (h *FASHandler) showSuccessPage(w http.ResponseWriter, child *models.Child, remainingMin int) {
-	tmpl := template.Must(template.New("success").Parse(successTemplate))
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl.Execute(w, map[string]interface{}{
-		"Name":      child.Name,
-		"Remaining": remainingMin,
-	})
-}
-
-// Portal HTML template
-const portalTemplate = `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Parenta - Login</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #fff;
-            color: #1a1a1a;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 1rem;
-        }
-        .container {
-            width: 100%;
-            max-width: 400px;
-            border: 1px solid #e0e0e0;
-            padding: 2rem;
-        }
-        h1 {
-            font-size: 1.5rem;
-            font-weight: 700;
-            letter-spacing: 0.1em;
-            margin-bottom: 1.5rem;
-            text-align: center;
-        }
-        .error {
-            background: #f5f5f5;
-            border: 1px solid #1a1a1a;
-            padding: 0.75rem;
-            margin-bottom: 1rem;
-            font-size: 0.9rem;
-        }
-        label {
-            display: block;
-            margin-bottom: 0.5rem;
-            font-weight: 500;
-        }
-        input {
-            width: 100%;
-            padding: 0.75rem;
-            border: 1px solid #e0e0e0;
-            margin-bottom: 1rem;
-            font-size: 1rem;
-        }
-        input:focus {
-            outline: none;
-            border-color: #1a1a1a;
-        }
-        button {
-            width: 100%;
-            padding: 0.75rem;
-            background: #1a1a1a;
-            color: #fff;
-            border: none;
-            cursor: pointer;
-            font-size: 1rem;
-            font-weight: 500;
-        }
-        button:hover {
-            opacity: 0.9;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>PARENTA</h1>
-        {{if .Error}}
-        <div class="error">{{.Error}}</div>
-        {{end}}
-        <form method="POST" action="/fas/auth">
-            <input type="hidden" name="hid" value="{{.HID}}">
-            <input type="hidden" name="mac" value="{{.MAC}}">
-            <input type="hidden" name="ip" value="{{.IP}}">
-            <input type="hidden" name="authdir" value="{{.AuthDir}}">
-            <input type="hidden" name="originurl" value="{{.OriginURL}}">
-
-            <label for="username">Username</label>
-            <input type="text" id="username" name="username" required autofocus>
-
-            <label for="password">Password</label>
-            <input type="password" id="password" name="password" required>
-
-            <button type="submit">Connect to Internet</button>
-        </form>
-    </div>
-</body>
-</html>`
-
-// Success HTML template
-const successTemplate = `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Connected</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #fff;
-            color: #1a1a1a;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 1rem;
-        }
-        .container {
-            text-align: center;
-            max-width: 400px;
-        }
-        h1 {
-            font-size: 1.5rem;
-            margin-bottom: 1rem;
-        }
-        p {
-            font-size: 1.1rem;
-            margin-bottom: 0.5rem;
-        }
-        .remaining {
-            font-size: 2rem;
-            font-weight: 700;
-            margin: 1rem 0;
-        }
-        .note {
-            color: #666;
-            font-size: 0.9rem;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Welcome, {{.Name}}!</h1>
-        <p>You are now connected to the internet.</p>
-        <div class="remaining">{{.Remaining}} minutes remaining</div>
-        <p class="note">You can close this window and start browsing.</p>
-    </div>
-</body>
-</html>`

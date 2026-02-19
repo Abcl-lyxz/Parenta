@@ -44,6 +44,7 @@ type ChildResponse struct {
 	RemainingMin    int             `json:"remaining_min"`
 	FilterMode      string          `json:"filter_mode"`
 	ScheduleID      string          `json:"schedule_id"`
+	ScheduleName    string          `json:"schedule_name"`
 	Devices         []models.Device `json:"devices"`
 	IsActive        bool            `json:"is_active"`
 	LastResetDate   string          `json:"last_reset_date"`
@@ -52,8 +53,8 @@ type ChildResponse struct {
 }
 
 // toResponse converts Child to ChildResponse
-func toChildResponse(c *models.Child) ChildResponse {
-	return ChildResponse{
+func (h *ChildrenHandler) toChildResponse(c *models.Child) ChildResponse {
+	resp := ChildResponse{
 		ID:            c.ID,
 		Username:      c.Username,
 		Name:          c.Name,
@@ -68,6 +69,15 @@ func toChildResponse(c *models.Child) ChildResponse {
 		CreatedAt:     c.CreatedAt,
 		UpdatedAt:     c.UpdatedAt,
 	}
+
+	// Lookup schedule name
+	if c.ScheduleID != "" {
+		if schedule := h.storage.GetSchedule(c.ScheduleID); schedule != nil {
+			resp.ScheduleName = schedule.Name
+		}
+	}
+
+	return resp
 }
 
 // Handle handles /api/children (list and create)
@@ -117,7 +127,7 @@ func (h *ChildrenHandler) list(w http.ResponseWriter, r *http.Request) {
 	children := h.storage.ListChildren()
 	response := make([]ChildResponse, len(children))
 	for i, c := range children {
-		response[i] = toChildResponse(c)
+		response[i] = h.toChildResponse(c)
 	}
 	JSON(w, http.StatusOK, response)
 }
@@ -128,7 +138,7 @@ func (h *ChildrenHandler) get(w http.ResponseWriter, r *http.Request, id string)
 		Error(w, http.StatusNotFound, "child not found")
 		return
 	}
-	JSON(w, http.StatusOK, toChildResponse(child))
+	JSON(w, http.StatusOK, h.toChildResponse(child))
 }
 
 func (h *ChildrenHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +197,7 @@ func (h *ChildrenHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	JSON(w, http.StatusCreated, toChildResponse(child))
+	JSON(w, http.StatusCreated, h.toChildResponse(child))
 }
 
 func (h *ChildrenHandler) update(w http.ResponseWriter, r *http.Request, id string) {
@@ -238,7 +248,7 @@ func (h *ChildrenHandler) update(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	JSON(w, http.StatusOK, toChildResponse(child))
+	JSON(w, http.StatusOK, h.toChildResponse(child))
 }
 
 func (h *ChildrenHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
@@ -272,7 +282,7 @@ func (h *ChildrenHandler) resetQuota(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	JSON(w, http.StatusOK, toChildResponse(child))
+	JSON(w, http.StatusOK, h.toChildResponse(child))
 }
 
 // AdjustQuotaRequest represents quota adjustment request
@@ -314,7 +324,7 @@ func (h *ChildrenHandler) adjustQuota(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	JSON(w, http.StatusOK, toChildResponse(child))
+	JSON(w, http.StatusOK, h.toChildResponse(child))
 }
 
 // DeviceRequest represents add device request
@@ -349,7 +359,7 @@ func (h *ChildrenHandler) addDevice(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	JSON(w, http.StatusOK, toChildResponse(child))
+	JSON(w, http.StatusOK, h.toChildResponse(child))
 }
 
 func (h *ChildrenHandler) removeDevice(w http.ResponseWriter, r *http.Request, id string) {
@@ -380,5 +390,5 @@ func (h *ChildrenHandler) removeDevice(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	JSON(w, http.StatusOK, toChildResponse(child))
+	JSON(w, http.StatusOK, h.toChildResponse(child))
 }

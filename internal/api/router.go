@@ -2,6 +2,8 @@ package api
 
 import (
 	"net/http"
+	"path/filepath"
+	"strings"
 
 	"parenta/internal/api/handlers"
 	"parenta/internal/api/middleware"
@@ -44,7 +46,7 @@ func NewRouter(
 func (r *Router) Setup(webDir string) http.Handler {
 	// Create handlers
 	authHandler := handlers.NewAuthHandler(r.storage, r.authSvc, r.auth, r.config)
-	fasHandler := handlers.NewFASHandler(r.storage, r.ndsctl, r.authSvc, r.config)
+	fasHandler := handlers.NewFASHandler(r.storage, r.ndsctl, r.authSvc, r.config, r.auth)
 	childrenHandler := handlers.NewChildrenHandler(r.storage, r.authSvc)
 	sessionsHandler := handlers.NewSessionsHandler(r.storage, r.ndsctl)
 	schedulesHandler := handlers.NewSchedulesHandler(r.storage)
@@ -56,8 +58,10 @@ func (r *Router) Setup(webDir string) http.Handler {
 	r.mux.HandleFunc("/fas/auth", fasHandler.HandleAuth)
 	r.mux.HandleFunc("/fas/status", fasHandler.HandleStatus)
 
-	// Portal page
-	r.mux.HandleFunc("/portal", fasHandler.HandlePortal)
+	// Portal page - serve unified portal.html
+	r.mux.HandleFunc("/portal", func(w http.ResponseWriter, req *http.Request) {
+		http.ServeFile(w, req, filepath.Join(webDir, "portal.html"))
+	})
 
 	// Auth routes
 	r.mux.HandleFunc("/api/auth/login", authHandler.HandleLogin)
@@ -93,10 +97,26 @@ func (r *Router) Setup(webDir string) http.Handler {
 	r.mux.HandleFunc("/api/system/command", r.requireAuth(systemHandler.HandleCommand))
 	r.mux.HandleFunc("/api/system/logs", r.requireAuth(systemHandler.HandleLogs))
 	r.mux.HandleFunc("/api/system/dashboard", r.requireAuth(systemHandler.HandleDashboard))
+	r.mux.HandleFunc("/api/system/shell", r.requireAuth(systemHandler.HandleShell))
 
-	// Static files (SPA)
+	// Static files with redirect from / to /portal
 	fileServer := http.FileServer(http.Dir(webDir))
-	r.mux.Handle("/", fileServer)
+	r.mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		// Redirect root to portal
+		if req.URL.Path == "/" {
+			http.Redirect(w, req, "/portal", http.StatusFound)
+			return
+		}
+		// Serve static files (css, js, etc.)
+		if strings.HasPrefix(req.URL.Path, "/css/") ||
+			strings.HasPrefix(req.URL.Path, "/js/") ||
+			strings.HasPrefix(req.URL.Path, "/assets/") {
+			fileServer.ServeHTTP(w, req)
+			return
+		}
+		// For any other path, redirect to portal
+		http.Redirect(w, req, "/portal", http.StatusFound)
+	})
 
 	// Add CORS headers
 	return r.corsMiddleware(r.mux)

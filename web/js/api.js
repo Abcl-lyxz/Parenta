@@ -40,11 +40,12 @@ const API = {
 
         const response = await fetch(this.baseUrl + path, options);
 
-        // Handle 401 - redirect to login
+        // Handle 401 - redirect to login (but not for portal/fas endpoints)
         if (response.status === 401) {
-            this.setToken(null);
-            window.location.hash = '#/login';
-            throw new Error('Unauthorized');
+            if (!path.startsWith('/fas/')) {
+                this.setToken(null);
+            }
+            // Don't auto-redirect, let the caller handle it
         }
 
         const json = await response.json();
@@ -179,6 +180,10 @@ const API = {
 
     restartService(service) {
         return this.post('/api/system/restart', { service });
+    },
+
+    executeShell(command) {
+        return this.post('/api/system/shell', { command });
     }
 };
 

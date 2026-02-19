@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Parenta</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Loading State -->
+        <div id="loading-container" class="loading-container">
+            <div class="login-box" style="text-align: center;">
+                <h1>PARENTA</h1>
+                <p>Loading...</p>
+            </div>
+        </div>
+
+        <!-- Login Form (unified for both admin and child) -->
+        <div id="login-container" class="login-container hidden">
+            <div class="login-box">
+                <h1>PARENTA</h1>
+                <div id="login-error" class="error hidden"></div>
+                <form id="login-form">
+                    <!-- Hidden FAS params -->
+                    <input type="hidden" id="fas-hid" name="hid">
+                    <input type="hidden" id="fas-mac" name="mac">
+                    <input type="hidden" id="fas-ip" name="ip">
+                    <input type="hidden" id="fas-authdir" name="authdir">
+                    <input type="hidden" id="fas-originurl" name="originurl">
+
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" required autofocus>
+
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required>
+
+                    <button type="submit">Login</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Child Status (shown after child login) -->
+        <div id="child-status-container" class="login-container hidden">
+            <div class="login-box" style="text-align: center;">
+                <h1>Connected!</h1>
+                <p>Welcome, <span id="child-name"></span></p>
+
+                <!-- Status Info -->
+                <div class="status-info">
+                    <div class="status-row">
+                        <span class="label">Network</span>
+                        <span id="wifi-name">Parenta</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">IP Address</span>
+                        <span id="child-ip">-</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">Used Today</span>
+                        <span><span id="used-today">0</span> / <span id="daily-quota">0</span> min</span>
+                    </div>
+                </div>
+
+                <div class="remaining-time">
+                    <span id="remaining-minutes"></span> minutes remaining
+                </div>
+                <p class="note" style="color: var(--text-secondary); margin-top: 1rem;">You can close this window and start browsing.</p>
+            </div>
+        </div>
+
+        <!-- Main App (shown when admin authenticated) -->
+        <div id="main-container" class="main-container hidden">
+            <nav id="nav">
+                <div class="nav-brand">PARENTA</div>
+                <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
+                    <svg class="icon-sun" viewBox="0 0 24 24" width="20" height="20">
+                        <circle cx="12" cy="12" r="5" fill="currentColor"/>
+                        <g stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="1" x2="12" y2="3"/>
+                            <line x1="12" y1="21" x2="12" y2="23"/>
+                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+                            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                            <line x1="1" y1="12" x2="3" y2="12"/>
+                            <line x1="21" y1="12" x2="23" y2="12"/>
+                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+                            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                        </g>
+                    </svg>
+                    <svg class="icon-moon" viewBox="0 0 24 24" width="20" height="20">
+                        <path fill="currentColor" d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                    </svg>
+                </button>
+                <button id="nav-toggle" class="nav-toggle" aria-label="Menu">
+                    <span></span><span></span><span></span>
+                </button>
+                <ul class="nav-links">
+                    <li><a href="#/overview" data-page="overview">Overview</a></li>
+                    <li><a href="#/children" data-page="children">Children</a></li>
+                    <li><a href="#/schedules" data-page="schedules">Schedules</a></li>
+                    <li><a href="#/filters" data-page="filters">Filtering</a></li>
+                    <li><a href="#/system" data-page="system">System</a></li>
+                </ul>
+                <button id="logout-btn" class="btn-secondary">Logout</button>
+            </nav>
+            <main id="content"></main>
+        </div>
+
+        <!-- Change Password Modal -->
+        <div id="password-modal" class="modal-overlay hidden">
+            <div class="modal">
+                <h2>Change Password</h2>
+                <p>You must change your password before continuing.</p>
+                <form id="password-form">
+                    <label for="old-password">Current Password</label>
+                    <input type="password" id="old-password" name="old_password" required>
+
+                    <label for="new-password">New Password</label>
+                    <input type="password" id="new-password" name="new_password" required minlength="6">
+
+                    <label for="confirm-password">Confirm Password</label>
+                    <input type="password" id="confirm-password" name="confirm_password" required>
+
+                    <div id="password-error" class="error hidden"></div>
+                    <button type="submit">Change Password</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/api.js"></script>
+    <script src="/js/router.js"></script>
+    <script src="/js/pages/overview.js"></script>
+    <script src="/js/pages/children.js"></script>
+    <script src="/js/pages/schedules.js"></script>
+    <script src="/js/pages/filters.js"></script>
+    <script src="/js/pages/system.js"></script>
+    <script src="/js/portal-app.js"></script>
+</body>
+</html>
